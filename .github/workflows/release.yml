@@ -1,0 +1,166 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: aether-linux-x86_64.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: aether-macos-x86_64.tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: aether-macos-arm64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: aether-windows-x86_64.zip
+    defaults:
+      run:
+        working-directory: aether
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.archive }} aether
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/aether.exe -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: aether/${{ matrix.archive }}
+          if-no-files-found: error
+
+  android:
+    name: Build aarch64-linux-android
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aether
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build release binary
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a --platform 24 build --release
+
+      - name: Package archive
+        run: |
+          cd target/aarch64-linux-android/release
+          tar -czf ../../../aether-android-arm64.tar.gz aether
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-android-arm64.tar.gz
+          path: aether/aether-android-arm64.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: dist/**/*
+          body: |
+            Aether is a user-space proxy client. It tunnels traffic out of a filtered network and exposes a local SOCKS5 proxy on 127.0.0.1:10808. Point a browser, terminal, or system proxy at that address and your traffic leaves through the tunnel.
+
+            This release includes prebuilt binaries for:
+
+            - Linux (x86_64)
+            - macOS (x86_64 and Apple Silicon)
+            - Windows (x86_64)
+            - Android / Termux (aarch64)
+
+            Quick start:
+
+            1. Download the archive for your platform and extract it.
+            2. Run the binary and answer the prompts, or set the environment variables listed in the guides.
+            3. Point your client at socks5h://127.0.0.1:10808 and verify with:
+               curl -x socks5h://127.0.0.1:10808 https://www.cloudflare.com/cdn-cgi/trace
+
+            On Termux, extract the aarch64 archive, run chmod +x aether, then ./aether.
+
+            See README.md and the Docs directory for transport selection, obfuscation profiles, the HTTP/2 vs HTTP/3 choice in MASQUE, and the full environment-variable reference.
